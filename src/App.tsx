@@ -433,7 +433,20 @@ Details: ${r.description.slice(0, 350)}`;
           <div className="space-y-2">
             <label className="block text-sm font-medium">Capture & privacy</label>
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.stealth} onChange={(e)=>setForm((f: any)=>({ ...f, stealth: e.target.checked }))} /> Stealth mode (no on-screen previews)</label>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.uploadWhenSafe} onChange={(e)=>setForm((f: any)=>({ ...f, uploadWhenSafe: e.target.checked }))} /> Upload when safe (move >= {settings.safe?.minMeters ?? 1000} m or wait {settings.safe?.maxWaitMins ?? 30} mins)</label>
+            <label className="flex items-center gap-2 text-sm">
+  <input
+    type="checkbox"
+    checked={form.uploadWhenSafe}
+    onChange={(e) =>
+      setForm((f: any) => ({ ...f, uploadWhenSafe: e.target.checked }))
+    }
+  />
+  <span>
+    Upload when safe (move &ge; {settings.safe?.minMeters ?? 1000} m or wait{" "}
+    {settings.safe?.maxWaitMins ?? 30} mins)
+  </span>
+</label>
+
             <div className="text-xs text-gray-500">Note: browsers cannot mute the hardware shutter; silence your device for stealth.</div>
           </div>
           <div className="space-y-2">
