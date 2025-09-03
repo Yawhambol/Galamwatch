@@ -5,16 +5,21 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 /**
- * GALAMWATCH — MVP with 6 Safety Features
- * Tabs: New Report | My Reports | Map | Help | Notes (Quick Hide)
- * Storage: LocalStorage only
+ * GALAMWATCH — MVP with 6 Safety Features + Auto Blackout Setting
+ * Tabs: New Report | My Reports | Map | Help | Settings | Notes (Cover)
+ *
  * Safety features:
  * 1) Pre-submit safety confirmation (must tick 2 boxes).
  * 2) Sensitive Location Mode (min blur = 500 m, disables 0 m preset).
  * 3) Privacy Meter (Low/Med/High) based on blur radius.
  * 4) Emergency Quick Dial (112) with confirm.
  * 5) EXIF auto-removal for images.
- * 6) Quick Hide to Notes screen (no overlays; inputs always usable).
+ * 6) Quick Hide to Notes screen (neutral cover).
+ *
+ * New: Settings -> Auto Blackout during capture
+ * - When enabled, tapping Add Photo/Video/Voice switches to the neutral Notes cover
+ *   while the device’s native camera/recorder UI runs. After selection, the app
+ *   returns to the Report screen automatically.
  */
 
 // Leaflet marker icon fix
@@ -45,7 +50,11 @@ function randomPointInRing(lat: number, lon: number, minM: number, maxM: number)
   const bearing = Math.random() * 2 * Math.PI;
   const d = minM + Math.random() * (maxM - minM);
   const R = 6371e3, phi1 = toRad(lat), lam1 = toRad(lon);
-  const phi2 = Math.asin(Math.sin(phi1) * Math.cos(d / R) + Math.cos(phi1) * Math.sin(d / R) * Math.cos(bearing));
+  const phi2 =
+    Math.asin(
+      Math.sin(phi1) * Math.cos(d / R) +
+        Math.cos(phi1) * Math.sin(d / R) * Math.cos(bearing)
+    );
   const lam2 =
     lam1 +
     Math.atan2(
@@ -73,9 +82,10 @@ function FitToBounds({ points }: { points: number[][] }) {
 }
 
 // Storage
-const LS_REPORTS = "gw_reports_v2";
-const LS_DRAFT = "gw_draft_v2";
-const LS_NOTES = "gw_notes_v1";
+const LS_REPORTS = "gw_reports_v3";
+const LS_DRAFT = "gw_draft_v3";
+const LS_NOTES = "gw_notes_v2";
+const LS_SETTINGS = "gw_settings_v1";
 
 const safeParse = <T,>(s: string | null, fallback: T): T => {
   try { return s ? (JSON.parse(s) as T) : fallback; } catch { return fallback; }
@@ -86,6 +96,8 @@ const loadDraft = () => (typeof window === "undefined" ? null : safeParse<any>(l
 const saveDraft = (d: any) => localStorage.setItem(LS_DRAFT, JSON.stringify(d));
 const loadNotes = () => (typeof window === "undefined" ? "" : (localStorage.getItem(LS_NOTES) || ""));
 const saveNotes = (t: string) => localStorage.setItem(LS_NOTES, t);
+const loadSettings = () => (typeof window === "undefined" ? { autoBlackout: false } : safeParse(localStorage.getItem(LS_SETTINGS), { autoBlackout: false }));
+const saveSettings = (s: any) => localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
 
 // Types
 type Media = { type: "image" | "video" | "audio"; name: string; dataUrl: string };
@@ -135,13 +147,15 @@ function privacyLabel(blur: number) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"report" | "my" | "map" | "help" | "cover">("report");
+  const [tab, setTab] = useState<"report" | "my" | "map" | "help" | "settings" | "cover">("report");
   const [reports, setReports] = useState<Report[]>(loadReports());
   const [userLoc, setUserLoc] = useState<null | { lat: number; lon: number; accuracy?: number }>(null);
   const [privateView, setPrivateView] = useState(true);
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [banner, setBanner] = useState<null | { type: "error" | "success" | "info"; text: string }>(null);
   const [notes, setNotes] = useState<string>(loadNotes());
+  const [settings, setSettings] = useState<{ autoBlackout: boolean }>(loadSettings());
+  const [coverReason, setCoverReason] = useState<string | null>(null);
 
   const initialForm = {
     category: "",
@@ -151,15 +165,16 @@ export default function App() {
     manualLon: "",
     blurRadius: 300,
     media: [] as Media[],
-    sensitiveMode: false,       // Safety feature 2
-    confirmSafe: false,         // Safety feature 1
-    confirmNoConfront: false,   // Safety feature 1
+    sensitiveMode: false,
+    confirmSafe: false,
+    confirmNoConfront: false,
   };
   const [form, setForm] = useState<any>(() => loadDraft() ?? initialForm);
 
   useEffect(() => saveReports(reports), [reports]);
   useEffect(() => saveDraft(form), [form]);
   useEffect(() => saveNotes(notes), [notes]);
+  useEffect(() => saveSettings(settings), [settings]);
 
   // Geolocation capture and watch
   const captureGps = () => {
@@ -184,10 +199,27 @@ export default function App() {
     return () => { try { (navigator.geolocation as any).clearWatch?.(id); } catch {} };
   }, []);
 
+  // Auto Blackout helpers
+  type CaptureKind = "photo" | "video" | "audio";
+  const handleCaptureStart = (kind: CaptureKind) => {
+    if (!settings.autoBlackout) return;
+    const msg = kind === "photo" ? "Opening camera…" : kind === "video" ? "Opening video recorder…" : "Opening audio recorder…";
+    setCoverReason(msg);
+    setTab("cover");
+  };
+  const handleCaptureFinish = () => {
+    if (!settings.autoBlackout) return;
+    // brief delay to avoid flicker when native UI closes
+    setTimeout(() => {
+      setCoverReason(null);
+      setTab("report");
+    }, 400);
+  };
+
   // Files
   const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: Media["type"]) => {
     const f = e.target.files?.[0];
-    if (!f) return;
+    if (!f) { handleCaptureFinish(); return; }
     try {
       const dataUrl = type === "image"
         ? await sanitizeImage(f) // Safety feature 5
@@ -198,10 +230,12 @@ export default function App() {
             fr.readAsDataURL(f);
           });
       setForm((v: any) => ({ ...v, media: [...v.media, { type, name: f.name, dataUrl }] }));
+      setBanner({ type: "success", text: `${type === "image" ? "Photo" : type === "video" ? "Video" : "Audio"} attached.` });
     } catch {
       setBanner({ type: "error", text: "Could not process file." });
     } finally {
       e.target.value = "";
+      handleCaptureFinish();
     }
   };
   const removeMedia = (i: number) =>
@@ -247,7 +281,7 @@ export default function App() {
       history: [{ state: "Submitted", at: nowIso }],
     };
     setReports((prev) => [r, ...prev]);
-    setForm({ ...initialForm, sensitiveMode: form.sensitiveMode }); // preserve mode if you want
+    setForm({ ...initialForm, sensitiveMode: form.sensitiveMode }); // keep sensitive mode if you like
     setBanner({ type: "success", text: "Report submitted. Track it in My Reports." });
 
     // Simulate backend receipt
@@ -261,7 +295,7 @@ export default function App() {
     setTab("my");
   };
 
-  // UI elements
+  // UI atoms
   const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
     <section className="bg-white rounded-2xl shadow p-4 sm:p-6 mb-5">
       <h2 className="text-lg sm:text-xl font-semibold mb-3">{title}</h2>
@@ -292,8 +326,12 @@ export default function App() {
     <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b">
       <div className="max-w-7xl mx-auto px-3 py-2 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <span className="font-semibold text-base sm:text-lg">{tab === "cover" ? "Notes" : "Galamwatch"}</span>
-          <span className="hidden sm:inline text-xs text-gray-500">{tab === "cover" ? "Personal notes" : "Privacy-first • Offline-ready"}</span>
+          <span className="font-semibold text-base sm:text-lg">
+            {tab === "cover" ? "Notes" : "Galamwatch"}
+          </span>
+          <span className="hidden sm:inline text-xs text-gray-500">
+            {tab === "cover" ? (coverReason ? "Cover active" : "Personal notes") : "Privacy-first • Offline-ready"}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           {tab !== "cover" ? (
@@ -313,6 +351,7 @@ export default function App() {
             { k: "my", label: "My Reports" },
             { k: "map", label: "Map" },
             { k: "help", label: "Help" },
+            { k: "settings", label: "Settings" },
           ].map((t) => (
             <button
               key={t.k}
@@ -330,7 +369,6 @@ export default function App() {
   // Screens
   const NewReport = () => {
     const meter = privacyLabel(form.sensitiveMode ? Math.max(500, form.blurRadius) : form.blurRadius);
-    const presets = form.sensitiveMode ? [500, 700, 1000, 1500, 2000] : [0, 100, 300, 500, 1000, 2000];
 
     return (
       <div className="max-w-7xl mx-auto px-3 py-4">
@@ -379,7 +417,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Safety confirmations (feature 1) */}
+          {/* Safety confirmations */}
           <div className="mt-4 grid sm:grid-cols-2 gap-4">
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.confirmSafe} onChange={(e) => setForm((f: any) => ({ ...f, confirmSafe: e.target.checked }))} />
@@ -391,7 +429,7 @@ export default function App() {
             </label>
           </div>
 
-          {/* Sensitive Mode (feature 2) + Privacy meter (feature 3) */}
+          {/* Sensitive Mode + Privacy meter */}
           <div className="mt-4 grid sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="block text-sm font-medium">Sensitive Location Mode</label>
@@ -408,15 +446,43 @@ export default function App() {
               </label>
             </div>
             <div className="flex items-end justify-end">
-              <span className={`px-2 py-1 rounded text-xs ${meter.cls}`}>Privacy level: {meter.label}</span>
+              <span className={`px-2 py-1 rounded text-xs ${privacyLabel(form.sensitiveMode ? Math.max(500, form.blurRadius) : form.blurRadius).cls}`}>
+                Privacy level: {privacyLabel(form.sensitiveMode ? Math.max(500, form.blurRadius) : form.blurRadius).label}
+              </span>
             </div>
           </div>
 
-          {/* Media */}
+          {/* Media (with Auto Blackout hooks) */}
           <div className="mt-4 grid sm:grid-cols-3 gap-3">
-            <div><label className="block text-sm font-medium">Add Photo</label><input type="file" accept="image/*" capture="environment" onChange={(e) => onFileChange(e, "image")} /></div>
-            <div><label className="block text-sm font-medium">Add Video</label><input type="file" accept="video/*" capture="environment" onChange={(e) => onFileChange(e, "video")} /></div>
-            <div><label className="block text-sm font-medium">Add Voice Note</label><input type="file" accept="audio/*" onChange={(e) => onFileChange(e, "audio")} /></div>
+            <div>
+              <label className="block text-sm font-medium">Add Photo</label>
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onClick={() => handleCaptureStart("photo")}
+                onChange={(e) => onFileChange(e, "image")}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium">Add Video</label>
+              <input
+                type="file"
+                accept="video/*"
+                capture="environment"
+                onClick={() => handleCaptureStart("video")}
+                onChange={(e) => onFileChange(e, "video")}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium">Add Voice Note</label>
+              <input
+                type="file"
+                accept="audio/*"
+                onClick={() => handleCaptureStart("audio")}
+                onChange={(e) => onFileChange(e, "audio")}
+              />
+            </div>
           </div>
           {form.media.length > 0 && (
             <div className="mt-3 grid sm:grid-cols-3 gap-3">
@@ -447,7 +513,7 @@ export default function App() {
             />
             <div className="flex items-center justify-between text-sm text-gray-600">
               <div className="flex gap-2">
-                { (form.sensitiveMode ? [500, 700, 1000, 1500, 2000] : [0, 100, 300, 500, 1000, 2000]).map((m) => (
+                {(form.sensitiveMode ? [500, 700, 1000, 1500, 2000] : [0, 100, 300, 500, 1000, 2000]).map((m) => (
                   <button key={m} onClick={() => setForm((f: any) => ({ ...f, blurRadius: m }))} className="px-2 py-1 rounded bg-gray-100">{m}m</button>
                 ))}
               </div>
@@ -460,8 +526,8 @@ export default function App() {
           <div className="mt-6 flex items-center justify-between">
             <ul className="list-disc pl-5 text-sm text-gray-700 space-y-1">
               <li>Keep a safe distance. Do not confront anyone.</li>
-              <li>Capture landmarks (bridge, bend) instead of faces or plates.</li>
-              <li>Use Sensitive Mode when near homes, schools, or water.</li>
+              <li>Use Sensitive Mode near homes, schools, or water.</li>
+              <li>Capture landmarks (bridge, bend) not faces/plates.</li>
             </ul>
             <div className="flex gap-2">
               <button
@@ -631,7 +697,7 @@ export default function App() {
               {userLoc && (
                 <>
                   <Marker position={[userLoc.lat, userLoc.lon] as any} />
-                  <Circle center={[userLoc.lat, userLoc.lon] as any} radius={userLoc.accuracy || 20} />
+                <Circle center={[userLoc.lat, userLoc.lon] as any} radius={userLoc.accuracy || 20} />
                 </>
               )}
               {reports.map((r) => {
@@ -641,7 +707,7 @@ export default function App() {
                   <React.Fragment key={r.id}>
                     <Marker position={pos} eventHandlers={{ click: () => setSelectedReportId(r.id) }} />
                     {!privateView && r.blurRadius > 0 && <Circle center={[r.gps.lat, r.gps.lon] as any} radius={r.blurRadius} />}
-                    {isSel && fitPts.length > 0 && <FitToBounds points={fitPts} />}
+                    {isSel && <FitToBounds points={fitPts} />}
                   </React.Fragment>
                 );
               })}
@@ -674,10 +740,32 @@ export default function App() {
     </div>
   );
 
-  // Quick Hide: Notes screen (feature 6)
+  // Settings (Auto Blackout toggle)
+  const Settings = () => (
+    <div className="max-w-3xl mx-auto px-3 py-4">
+      <Section title="Settings">
+        <label className="flex items-center gap-3 text-sm">
+          <input
+            type="checkbox"
+            checked={settings.autoBlackout}
+            onChange={(e) => setSettings({ ...settings, autoBlackout: e.target.checked })}
+          />
+          Auto Blackout during capture (switch to Notes when opening camera/recorder)
+        </label>
+        <p className="mt-2 text-xs text-gray-600">
+          This hides the reporting UI and shows a neutral Notes screen while your phone&apos;s native
+          camera or recorder runs. For privacy reasons, browsers still show the native permission/
+          recording indicators and require your action in the device UI.
+        </p>
+      </Section>
+    </div>
+  );
+
+  // Quick Hide / Cover screen (also used by Auto Blackout)
   const NotesCover = () => (
     <div className="max-w-3xl mx-auto px-3 py-4">
       <Section title="My Notes">
+        {coverReason && <div className="mb-2 text-xs text-gray-600">{coverReason}</div>}
         <textarea
           className="w-full rounded-xl border px-3 py-2 min-h-[260px]"
           placeholder="Write notes..."
@@ -696,6 +784,7 @@ export default function App() {
       {tab === "my" && <MyReports />}
       {tab === "map" && <MapView />}
       {tab === "help" && <Help />}
+      {tab === "settings" && <Settings />}
       {tab === "cover" && <NotesCover />}
       <footer className="max-w-7xl mx-auto px-3 py-6 text-xs text-gray-500">
         Demo only • All data stored locally • AAMUSTED project
