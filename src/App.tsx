@@ -5,9 +5,11 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 /**
- * GALAMWATCH — Fast, Mobile-Friendly MVP
- * Fixes: typing freeze on phones (debounced draft saves, no constant geowatch, exclude media from autosave)
- * Safety: 6 features + Auto-Blackout setting
+ * GALAMWATCH — Fast Input Build (2025-09-04 r3)
+ * - Uncontrolled text inputs (no lag while typing)
+ * - No autosave on every key
+ * - Tap-to-capture GPS (no background watchers)
+ * - Safety features retained (6) + optional Auto Blackout cover
  */
 
 // Leaflet marker icon fix
@@ -69,26 +71,20 @@ function FitToBounds({ points }: { points: number[][] }) {
   return null;
 }
 
-// Storage keys
-const LS_REPORTS = "gw_reports_v4";
-const LS_DRAFT = "gw_draft_v4";
-const LS_NOTES = "gw_notes_v3";
-const LS_SETTINGS = "gw_settings_v2";
+// Storage keys (light)
+const LS_REPORTS = "gw_reports_r3";
+const LS_SETTINGS = "gw_settings_r3";
+const LS_NOTES = "gw_notes_r3";
 
 const safeParse = <T,>(s: string | null, fallback: T): T => {
   try { return s ? (JSON.parse(s) as T) : fallback; } catch { return fallback; }
 };
 const loadReports = () => (typeof window === "undefined" ? [] : safeParse<Report[]>(localStorage.getItem(LS_REPORTS), []));
 const saveReports = (r: Report[]) => localStorage.setItem(LS_REPORTS, JSON.stringify(r));
+const loadSettings = () => (typeof window === "undefined" ? { autoBlackout: false } : safeParse(localStorage.getItem(LS_SETTINGS), { autoBlackout: false }));
+const saveSettings = (s: any) => localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
 const loadNotes = () => (typeof window === "undefined" ? "" : (localStorage.getItem(LS_NOTES) || ""));
 const saveNotes = (t: string) => localStorage.setItem(LS_NOTES, t);
-const loadSettings = () =>
-  (typeof window === "undefined" ? { autoBlackout: false } :
-    safeParse<{ autoBlackout: boolean }>(localStorage.getItem(LS_SETTINGS), { autoBlackout: false }));
-const saveSettings = (s: any) => localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
-const loadDraftLight = () =>
-  (typeof window === "undefined" ? null :
-    safeParse<any>(localStorage.getItem(LS_DRAFT), null)); // light draft (no media)
 
 // Types
 type Media = { type: "image" | "video" | "audio"; name: string; dataUrl: string };
@@ -137,17 +133,6 @@ function privacyLabel(blur: number) {
   return { label: "Low", cls: "bg-red-100 text-red-700" };
 }
 
-// Debounced effect
-function useDebouncedEffect(effect: () => void, deps: any[], delay = 600) {
-  const t = useRef<any>();
-  useEffect(() => {
-    clearTimeout(t.current);
-    t.current = setTimeout(effect, delay);
-    return () => clearTimeout(t.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-}
-
 export default function App() {
   const [tab, setTab] = useState<"report" | "my" | "map" | "help" | "settings" | "cover">("report");
   const [reports, setReports] = useState<Report[]>(loadReports());
@@ -159,52 +144,41 @@ export default function App() {
   const [settings, setSettings] = useState<{ autoBlackout: boolean }>(loadSettings());
   const [coverReason, setCoverReason] = useState<string | null>(null);
 
-  // Light draft (NO media inside to avoid heavy localStorage writes)
-  const initialForm = {
-    category: "",
-    description: "",
-    gps: null as null | { lat: number; lon: number; accuracy?: number },
-    manualLat: "",
-    manualLon: "",
-    blurRadius: 300,
-    media: [] as Media[],       // kept in memory only (not autosaved)
-    sensitiveMode: false,
-    confirmSafe: false,
-    confirmNoConfront: false,
-  };
-  const loaded = loadDraftLight();
-  const [form, setForm] = useState<any>(loaded ? { ...initialForm, ...loaded, media: [] } : initialForm);
+  // Minimal form state; text fields are uncontrolled (refs)
+  const [category, setCategory] = useState<string>("");
+  const descRef = useRef<HTMLTextAreaElement | null>(null);
+  const latRef = useRef<HTMLInputElement | null>(null);
+  const lonRef = useRef<HTMLInputElement | null>(null);
+  const [gps, setGps] = useState<null | { lat: number; lon: number; accuracy?: number }>(null);
+  const [blurRadius, setBlurRadius] = useState<number>(300);
+  const [media, setMedia] = useState<Media[]>([]);
+  const [sensitiveMode, setSensitiveMode] = useState<boolean>(false);
+  const [confirmSafe, setConfirmSafe] = useState<boolean>(false);
+  const [confirmNoConfront, setConfirmNoConfront] = useState<boolean>(false);
 
-  // Persist reports & notes & settings normally
   useEffect(() => saveReports(reports), [reports]);
-  useEffect(() => saveNotes(notes), [notes]);
   useEffect(() => saveSettings(settings), [settings]);
+  useEffect(() => saveNotes(notes), [notes]);
 
-  // Debounced, light autosave of draft (exclude media)
-  useDebouncedEffect(() => {
-    const { media, ...light } = form;
-    localStorage.setItem(LS_DRAFT, JSON.stringify(light));
-  }, [form.category, form.description, form.gps, form.manualLat, form.manualLon, form.blurRadius, form.sensitiveMode, form.confirmSafe, form.confirmNoConfront], 700);
-
-  // One-tap GPS capture (no continuous watch -> fewer re-renders)
+  // GPS (tap to capture)
   const captureGps = () => {
     if (!navigator.geolocation) { setBanner({ type: "error", text: "Geolocation not supported on this device." }); return; }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const d = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy };
         setUserLoc(d);
-        setForm((f: any) => ({ ...f, gps: d, manualLat: "", manualLon: "" }));
+        setGps(d);
       },
       () => setBanner({ type: "error", text: "Could not get GPS. Check permission/location settings." }),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 }
     );
   };
 
-  // Auto-Blackout helpers
+  // Auto Blackout
   type CaptureKind = "image" | "video" | "audio";
   const handleCaptureStart = (kind: CaptureKind) => {
     if (!settings.autoBlackout) return;
-    const msg = kind === "image" ? "Opening camera…" : kind === "video" ? "Opening video recorder…" : "Opening audio recorder…";
+    const msg = kind === "image" ? "Opening camera..." : kind === "video" ? "Opening video recorder..." : "Opening audio recorder...";
     setCoverReason(msg);
     setTab("cover");
   };
@@ -213,7 +187,7 @@ export default function App() {
     setTimeout(() => { setCoverReason(null); setTab("report"); }, 300);
   };
 
-  // Files (media not stored in draft autosave)
+  // Files
   const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: Media["type"]) => {
     const f = e.target.files?.[0];
     if (!f) { handleCaptureFinish(); return; }
@@ -226,7 +200,7 @@ export default function App() {
             fr.onerror = rej;
             fr.readAsDataURL(f);
           });
-      setForm((v: any) => ({ ...v, media: [...v.media, { type, name: f.name, dataUrl }] }));
+      setMedia((prev) => [...prev, { type, name: f.name, dataUrl }]);
       setBanner({ type: "success", text: `${type === "image" ? "Photo" : type === "video" ? "Video" : "Audio"} attached.` });
     } catch {
       setBanner({ type: "error", text: "Could not process file." });
@@ -235,58 +209,67 @@ export default function App() {
       handleCaptureFinish();
     }
   };
-  const removeMedia = (i: number) =>
-    setForm((v: any) => ({ ...v, media: v.media.filter((_: any, idx: number) => idx !== i) }));
+  const removeMedia = (i: number) => setMedia((prev) => prev.filter((_, idx) => idx !== i));
 
-  // Submit with safety gates
+  // Submit
   const submitReport = () => {
     setBanner(null);
-    if (!form.confirmSafe || !form.confirmNoConfront) {
+    if (!confirmSafe || !confirmNoConfront) {
       setBanner({ type: "error", text: "Please confirm you are at a safe distance and will not confront anyone." });
       return;
     }
-    const desc = String(form.description || "").trim();
-    if (!desc) { setBanner({ type: "error", text: "Please add a short description." }); return; }
+    const description = (descRef.current?.value || "").trim();
+    if (!description) { setBanner({ type: "error", text: "Please add a short description." }); return; }
 
-    // GPS: captured or manual
-    let gps = form.gps as null | { lat: number; lon: number; accuracy?: number };
-    const latNum = Number(form.manualLat), lonNum = Number(form.manualLon);
-    const latOk = isFinite(latNum) && latNum >= -90 && latNum <= 90;
-    const lonOk = isFinite(lonNum) && lonNum >= -180 && lonNum <= 180;
-    if (!gps && latOk && lonOk) gps = { lat: latNum, lon: lonNum };
-    if (!gps) { setBanner({ type: "error", text: "Please tap Use My Location or enter latitude and longitude." }); return; }
+    let useGps = gps;
+    const lat = Number(latRef.current?.value || "");
+    const lon = Number(lonRef.current?.value || "");
+    const latOk = isFinite(lat) && lat >= -90 && lat <= 90;
+    const lonOk = isFinite(lon) && lon >= -180 && lon <= 180;
+    if (!useGps && latOk && lonOk) useGps = { lat, lon };
 
-    // Enforce sensitive mode minimum blur
-    const minBlur = form.sensitiveMode ? 500 : 0;
-    const chosenBlur = Math.max(minBlur, clamp(Number(form.blurRadius || 0), 0, 2000));
+    if (!useGps) { setBanner({ type: "error", text: "Tap Use My Location or enter latitude and longitude." }); return; }
 
-    const id = uuidv4();
+    const minBlur = sensitiveMode ? 500 : 0;
+    const chosenBlur = Math.max(minBlur, clamp(Number(blurRadius || 0), 0, 2000));
     const offset = chosenBlur > 0
-      ? randomPointInRing(gps.lat, gps.lon, Math.max(1, chosenBlur * 0.5), chosenBlur)
-      : { lat: gps.lat, lon: gps.lon };
+      ? randomPointInRing(useGps.lat, useGps.lon, Math.max(1, chosenBlur * 0.5), chosenBlur)
+      : { lat: useGps.lat, lon: useGps.lon };
+
     const nowIso = new Date().toISOString();
-    const r: Report = {
-      id,
+    const report: Report = {
+      id: uuidv4(),
       createdAt: nowIso,
-      category: form.category || "Unspecified",
-      description: desc,
-      gps,
+      category: category || "Unspecified",
+      description,
+      gps: useGps,
       blurRadius: chosenBlur,
       publicOffset: offset,
-      media: form.media,
+      media,
       status: "Submitted",
       history: [{ state: "Submitted", at: nowIso }],
     };
-    setReports((prev) => [r, ...prev]);
-    setForm({ ...initialForm, sensitiveMode: form.sensitiveMode }); // reset but keep sensitive mode if it was on
-    localStorage.removeItem(LS_DRAFT);
+    setReports((prev) => [report, ...prev]);
+
+    // reset form (but keep sensitive mode if it was on)
+    setCategory("");
+    if (descRef.current) descRef.current.value = "";
+    if (latRef.current) latRef.current.value = "";
+    if (lonRef.current) lonRef.current.value = "";
+    setGps(null);
+    setBlurRadius(sensitiveMode ? 500 : 300);
+    setMedia([]);
+    setConfirmSafe(false);
+    setConfirmNoConfront(false);
+
     setBanner({ type: "success", text: "Report submitted. Track it in My Reports." });
 
-    // Simulate backend receipt
     setTimeout(() => {
       setReports((prev) =>
         prev.map((x) =>
-          x.id === r.id ? { ...x, status: "Received", history: [...x.history, { state: "Received", at: new Date().toISOString() }] } : x
+          x.id === report.id
+            ? { ...x, status: "Received", history: [...x.history, { state: "Received", at: new Date().toISOString() }] }
+            : x
         )
       );
     }, 900);
@@ -314,7 +297,7 @@ export default function App() {
     );
   };
 
-  // Header with Quick Hide and Emergency Dial
+  // Header + safety buttons
   const emergencyDial = () => {
     const ok = window.confirm("Call emergency services (112)?");
     if (ok) window.location.href = "tel:112";
@@ -328,7 +311,7 @@ export default function App() {
             {tab === "cover" ? "Notes" : "Galamwatch"}
           </span>
           <span className="hidden sm:inline text-xs text-gray-500">
-            {tab === "cover" ? (coverReason ? "Cover active" : "Personal notes") : "Privacy-first • Offline-ready"}
+            {tab === "cover" ? (coverReason ? "Cover active" : "Personal notes") : "v2025-09-04 r3 • Privacy-first"}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -366,8 +349,8 @@ export default function App() {
 
   // Screens
   const NewReport = () => {
-    const meter = privacyLabel(form.sensitiveMode ? Math.max(500, form.blurRadius) : form.blurRadius);
-    const selectedBlur = form.sensitiveMode ? Math.max(500, form.blurRadius) : form.blurRadius;
+    const selectedBlur = sensitiveMode ? Math.max(500, blurRadius) : blurRadius;
+    const meter = privacyLabel(selectedBlur);
 
     return (
       <div className="max-w-7xl mx-auto px-3 py-4">
@@ -381,8 +364,10 @@ export default function App() {
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
               <label htmlFor="cat" className="block text-sm font-medium">Category</label>
-              <select id="cat" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.category} onChange={(e) => setForm((f: any) => ({ ...f, category: e.target.value }))}>
-                <option value="">Select… (optional)</option>
+              <select id="cat" className="mt-1 w-full rounded-xl border px-3 py-2"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}>
+                <option value="">Select (optional)</option>
                 <option>River dredging</option>
                 <option>Excavator in reserve</option>
                 <option>Chemical use</option>
@@ -396,34 +381,34 @@ export default function App() {
               <label className="block text-sm font-medium">GPS Location</label>
               <div className="mt-1 flex items-center gap-2">
                 <button onClick={captureGps} className="px-3 py-2 rounded-xl bg-gray-900 text-white">Use My Location</button>
-                {form.gps ? (
+                {gps ? (
                   <span className="text-sm text-gray-700">
-                    {form.gps.lat.toFixed(5)}, {form.gps.lon.toFixed(5)} • ±{Math.round(form.gps.accuracy || 0)} m
+                    {gps.lat.toFixed(5)}, {gps.lon.toFixed(5)} • ±{Math.round(gps.accuracy || 0)} m
                   </span>
                 ) : (
                   <span className="text-sm text-gray-500">No location yet</span>
                 )}
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2">
-                <input id="lat" inputMode="decimal" className="rounded-xl border px-3 py-2 text-sm" placeholder="Latitude (e.g., 5.6037)" value={form.manualLat} onChange={(e) => setForm((f: any) => ({ ...f, manualLat: e.target.value }))} />
-                <input id="lon" inputMode="decimal" className="rounded-xl border px-3 py-2 text-sm" placeholder="Longitude (e.g., -0.1870)" value={form.manualLon} onChange={(e) => setForm((f: any) => ({ ...f, manualLon: e.target.value }))} />
+                <input id="lat" ref={latRef} inputMode="decimal" className="rounded-xl border px-3 py-2 text-sm" placeholder="Latitude (e.g., 5.6037)" />
+                <input id="lon" ref={lonRef} inputMode="decimal" className="rounded-xl border px-3 py-2 text-sm" placeholder="Longitude (e.g., -0.1870)" />
               </div>
             </div>
 
             <div className="sm:col-span-2">
               <label htmlFor="desc" className="block text-sm font-medium">Description</label>
-              <textarea id="desc" className="mt-1 w-full rounded-xl border px-3 py-2 min-h-[110px]" placeholder="What did you see? When? Any landmarks?" value={form.description} onChange={(e) => setForm((f: any) => ({ ...f, description: e.target.value }))} />
+              <textarea id="desc" ref={descRef} className="mt-1 w-full rounded-xl border px-3 py-2 min-h-[110px]" placeholder="What did you see? When? Any landmarks?" />
             </div>
           </div>
 
           {/* Safety confirmations */}
           <div className="mt-4 grid sm:grid-cols-2 gap-4">
             <label htmlFor="safe" className="flex items-center gap-2 text-sm">
-              <input id="safe" type="checkbox" checked={form.confirmSafe} onChange={(e) => setForm((f: any) => ({ ...f, confirmSafe: e.target.checked }))} />
+              <input id="safe" type="checkbox" checked={confirmSafe} onChange={(e) => setConfirmSafe(e.target.checked)} />
               I am at a safe distance.
             </label>
             <label htmlFor="nocon" className="flex items-center gap-2 text-sm">
-              <input id="nocon" type="checkbox" checked={form.confirmNoConfront} onChange={(e) => setForm((f: any) => ({ ...f, confirmNoConfront: e.target.checked }))} />
+              <input id="nocon" type="checkbox" checked={confirmNoConfront} onChange={(e) => setConfirmNoConfront(e.target.checked)} />
               I will not confront anyone.
             </label>
           </div>
@@ -436,13 +421,14 @@ export default function App() {
                 <input
                   id="sens"
                   type="checkbox"
-                  checked={form.sensitiveMode}
+                  checked={sensitiveMode}
                   onChange={(e) => {
                     const on = e.target.checked;
-                    setForm((f: any) => ({ ...f, sensitiveMode: on, blurRadius: on ? Math.max(500, f.blurRadius) : f.blurRadius }));
+                    setSensitiveMode(on);
+                    if (on && blurRadius < 500) setBlurRadius(500);
                   }}
                 />
-                Treat this as a sensitive area (homes, schools, water). Enforces min blur of 500 m.
+                Treat this as a sensitive area (homes, schools, water). Enforces minimum blur of 500 m.
               </label>
             </div>
             <div className="flex items-end justify-end">
@@ -454,40 +440,20 @@ export default function App() {
           <div className="mt-4 grid sm:grid-cols-3 gap-3">
             <div>
               <label htmlFor="photo" className="block text-sm font-medium">Add Photo</label>
-              <input
-                id="photo"
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onClick={() => handleCaptureStart("image")}
-                onChange={(e) => onFileChange(e, "image")}
-              />
+              <input id="photo" type="file" accept="image/*" capture="environment" onClick={() => handleCaptureStart("image")} onChange={(e) => onFileChange(e, "image")} />
             </div>
             <div>
               <label htmlFor="video" className="block text-sm font-medium">Add Video</label>
-              <input
-                id="video"
-                type="file"
-                accept="video/*"
-                capture="environment"
-                onClick={() => handleCaptureStart("video")}
-                onChange={(e) => onFileChange(e, "video")}
-              />
+              <input id="video" type="file" accept="video/*" capture="environment" onClick={() => handleCaptureStart("video")} onChange={(e) => onFileChange(e, "video")} />
             </div>
             <div>
               <label htmlFor="audio" className="block text-sm font-medium">Add Voice Note</label>
-              <input
-                id="audio"
-                type="file"
-                accept="audio/*"
-                onClick={() => handleCaptureStart("audio")}
-                onChange={(e) => onFileChange(e, "audio")}
-              />
+              <input id="audio" type="file" accept="audio/*" onClick={() => handleCaptureStart("audio")} onChange={(e) => onFileChange(e, "audio")} />
             </div>
           </div>
-          {form.media.length > 0 && (
+          {media.length > 0 && (
             <div className="mt-3 grid sm:grid-cols-3 gap-3">
-              {form.media.map((m: Media, i: number) => (
+              {media.map((m, i) => (
                 <div key={i} className="border rounded-xl p-2">
                   <div className="text-xs text-gray-500 mb-1">{m.type} • {m.name}</div>
                   {m.type === "image" && <img src={m.dataUrl} className="w-full h-36 object-cover rounded-lg" alt="" />}
@@ -506,24 +472,23 @@ export default function App() {
             <input
               id="blur"
               type="range"
-              min={form.sensitiveMode ? 500 : 0}
+              min={sensitiveMode ? 500 : 0}
               max={2000}
               step={50}
               value={selectedBlur}
-              onChange={(e) => setForm((f: any) => ({ ...f, blurRadius: Number(e.target.value) }))}
+              onChange={(e) => setBlurRadius(Number(e.target.value))}
               className="w-full"
             />
             <div className="flex items-center justify-between text-sm text-gray-600">
               <div className="flex gap-2">
-                {(form.sensitiveMode ? [500, 700, 1000, 1500, 2000] : [0, 100, 300, 500, 1000, 2000]).map((m) => (
-                  <button key={m} onClick={() => setForm((f: any) => ({ ...f, blurRadius: m }))} className="px-2 py-1 rounded bg-gray-100">{m}m</button>
+                {(sensitiveMode ? [500, 700, 1000, 1500, 2000] : [0, 100, 300, 500, 1000, 2000]).map((m) => (
+                  <button key={m} onClick={() => setBlurRadius(m)} className="px-2 py-1 rounded bg-gray-100">{m}m</button>
                 ))}
               </div>
               <span>Selected: <b>{selectedBlur} m</b></span>
             </div>
             <p className="mt-2 text-xs text-gray-600">
-              <b>How it works:</b> Public maps hide the exact point. The public pin is placed randomly inside your blur circle.
-              Choose a larger blur in sensitive areas.
+              How it works: Public maps never show your exact point. The public pin is placed randomly inside your blur circle. Use larger blur in sensitive areas.
             </p>
           </div>
 
@@ -537,47 +502,17 @@ export default function App() {
             <div className="flex gap-2">
               <button
                 onClick={submitReport}
-                className={`px-4 py-2 rounded-xl text-white ${form.confirmSafe && form.confirmNoConfront ? "bg-emerald-600" : "bg-gray-400 cursor-not-allowed"}`}
-                disabled={!form.confirmSafe || !form.confirmNoConfront}
+                className={`px-4 py-2 rounded-xl text-white ${confirmSafe && confirmNoConfront ? "bg-emerald-600" : "bg-gray-400 cursor-not-allowed"}`}
+                disabled={!confirmSafe || !confirmNoConfront}
               >
                 Submit Report
               </button>
             </div>
           </div>
         </Section>
-
-        {/* (Optional) Map preview removed from this page to avoid extra re-renders while typing */}
       </div>
     );
   };
-
-  function LeafletPreview({ gps, blurRadius, privateView }: { gps: any; blurRadius: number; privateView: boolean }) {
-    const center = gps ? [gps.lat, gps.lon] : [5.556, -0.1969]; // Accra
-    const offset = useMemo(() => {
-      if (!gps) return null;
-      const br = clamp(Number(blurRadius || 0), 0, 2000);
-      if (br <= 0) return { lat: gps.lat, lon: gps.lon };
-      return randomPointInRing(gps.lat, gps.lon, Math.max(1, br * 0.5), br);
-    }, [gps ? gps.lat : null, gps ? gps.lon : null, blurRadius]);
-
-    return (
-      <MapContainer center={center as any} zoom={15} style={{ height: "100%", width: "100%" }}>
-        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap" />
-        {gps && privateView && (
-          <>
-            <Marker position={[gps.lat, gps.lon] as any} />
-            <Circle center={[gps.lat, gps.lon] as any} radius={gps.accuracy || 15} />
-          </>
-        )}
-        {gps && !privateView && offset && (
-          <>
-            <Marker position={[offset.lat, offset.lon] as any} />
-            <Circle center={[gps.lat, gps.lon] as any} radius={clamp(Number(blurRadius || 0), 0, 2000)} />
-          </>
-        )}
-      </MapContainer>
-    );
-  }
 
   const MyReports = () => (
     <div className="max-w-7xl mx-auto px-3 py-4">
@@ -594,7 +529,9 @@ export default function App() {
                 </div>
                 <div className="text-sm text-gray-700 mb-2 whitespace-pre-line">{r.description}</div>
                 <div className="text-xs text-gray-600 mb-2">{r.gps.lat.toFixed(5)}, {r.gps.lon.toFixed(5)} • Blur {r.blurRadius} m</div>
-                <Timeline status={r.status} />
+                <div className="mb-2">
+                  <Timeline status={r.status} />
+                </div>
                 {r.media?.length > 0 && (
                   <div className="mt-2 grid grid-cols-3 gap-2">
                     {r.media.slice(0, 3).map((m, i) => (
@@ -621,7 +558,7 @@ export default function App() {
                   >
                     Export JSON
                   </button>
-                  <button onClick={() => setSelectedReportId(r.id) || setTab("map")} className="px-3 py-1.5 rounded-xl bg-gray-100 text-gray-800 text-xs">
+                  <button onClick={() => { setSelectedReportId(r.id); setTab("map"); }} className="px-3 py-1.5 rounded-xl bg-gray-100 text-gray-800 text-xs">
                     Locate on Map
                   </button>
                   {r.status !== "Resolved" && (
@@ -717,7 +654,7 @@ export default function App() {
         <ul className="list-disc pl-5 text-sm text-gray-700 space-y-1">
           <li>Keep a safe distance. Never confront anyone.</li>
           <li>Use Sensitive Mode near homes, schools, or water sources.</li>
-          <li>Use larger blur for safety; you can set 500 m and above.</li>
+          <li>Use larger blur for safety; 500 m and above improves privacy.</li>
           <li>Images remove EXIF metadata to reduce device-identifying data.</li>
         </ul>
         <div className="mt-4 flex items-center gap-2">
@@ -727,7 +664,6 @@ export default function App() {
     </div>
   );
 
-  // Settings (Auto Blackout toggle)
   const Settings = () => (
     <div className="max-w-3xl mx-auto px-3 py-4">
       <Section title="Settings">
@@ -740,14 +676,13 @@ export default function App() {
           Auto Blackout during capture (switch to Notes when opening camera/recorder)
         </label>
         <p className="mt-2 text-xs text-gray-600">
-          This hides the reporting UI and shows a neutral Notes screen while your phone&apos;s native
-          camera or recorder runs. Browsers still show native permission/recording indicators.
+          This shows a neutral Notes screen while your phone opens the camera/recorder UI.
+          Mobile browsers still require visible permissions and show OS indicators.
         </p>
       </Section>
     </div>
   );
 
-  // Quick Hide / Cover screen (also used by Auto Blackout)
   const NotesCover = () => (
     <div className="max-w-3xl mx-auto px-3 py-4">
       <Section title="My Notes">
