@@ -5,14 +5,14 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 /**
- * GALAMWATCH — Safety Upgrade (r6, 2025-09-04)
- * - App Lock + Duress PIN (wipe)
- * - Quick Hide + Quick Wipe (long-press)
- * - “I’m Safe” check-ins + Move-away alert
- * - Manual Image Redaction (draw blur boxes)
+ * GALAMWATCH — Safety Upgrade (r7, no-duress)
+ * - App PIN lock (no duress)
+ * - Quick Hide (Notes) + Quick Wipe (Settings)
+ * - “I’m Safe” check-ins + move-away reminder
  * - Auto Blackout cover during capture
+ * - Manual photo redaction (pixelate boxes)
  * - AES-GCM Encrypted export + Redacted export
- * - DP heatmap with k-anonymity on public map
+ * - DP heatmap w/ k-anonymity
  * - Auto-expiry cleanup
  * - Learn guide in Settings
  *
@@ -43,7 +43,8 @@ function randomPointInRing(lat: number, lon: number, minM: number, maxM: number)
   const lam2 = lam1 + Math.atan2(Math.sin(bearing)*Math.sin(d/R)*Math.cos(phi1), Math.cos(d/R)-Math.sin(phi1)*Math.sin(phi2));
   return { lat: (phi2*180)/Math.PI, lon: (lam2*180)/Math.PI };
 }
-const pointsKey = (pts: number[][]) => pts.filter(p=>p&&isFinite(p[0])&&isFinite(p[1])).map(p=>`${p[0].toFixed(6)},${p[1].toFixed(6)}`).join("|");
+const pointsKey = (pts: number[][]) =>
+  pts.filter(p=>p&&isFinite(p[0])&&isFinite(p[1])).map(p=>`${p[0].toFixed(6)},${p[1].toFixed(6)}`).join("|");
 function FitToBounds({ points }: { points: number[][] }) {
   const map = useMap();
   const sig = useMemo(() => pointsKey(points), [points]);
@@ -57,10 +58,10 @@ function FitToBounds({ points }: { points: number[][] }) {
 }
 
 // ---------- Storage ----------
-const LS_REPORTS = "gw_reports_r6";
-const LS_SETTINGS = "gw_settings_r6";
-const LS_NOTES = "gw_notes_r6";
-const LS_LOCKSTATE = "gw_locked_r6"; // "locked" | "unlocked"
+const LS_REPORTS = "gw_reports_r7";
+const LS_SETTINGS = "gw_settings_r7";
+const LS_NOTES = "gw_notes_r7";
+const LS_LOCKSTATE = "gw_locked_r7"; // "locked" | "unlocked"
 const safeParse = <T,>(s: string | null, fallback: T): T => { try { return s ? (JSON.parse(s) as T) : fallback; } catch { return fallback; }};
 
 // ---------- Types ----------
@@ -80,7 +81,6 @@ type Settings = {
   autoBlackout: boolean;
   authoritySms: string;
   appPinHash?: string;       // SHA-256(hex)
-  duressPinHash?: string;    // SHA-256(hex)
   lockMyReports: boolean;
   lockSettings: boolean;
   autoExpiryDays: number;    // 0 = off
@@ -104,7 +104,7 @@ const saveNotes = (t: string) => localStorage.setItem(LS_NOTES, t);
 const getLockState = () => (typeof window === "undefined" ? "unlocked" : (localStorage.getItem(LS_LOCKSTATE) || "unlocked"));
 const setLockState = (v: "locked" | "unlocked") => localStorage.setItem(LS_LOCKSTATE, v);
 
-// ---------- Crypto helpers (no libs) ----------
+// ---------- Crypto helpers ----------
 async function sha256Hex(str: string) {
   const enc = new TextEncoder();
   const buf = await crypto.subtle.digest("SHA-256", enc.encode(str));
@@ -187,35 +187,30 @@ export default function App() {
     if (cleaned.length !== reports.length) setReports(cleaned);
   }, []); // on first mount
 
-  // Lock gate: default lock if settings require and entering My Reports/Settings
-  useEffect(() => {
-    if (!locked) return;
-    setTab("lock");
-  }, [locked]);
+  // Lock gate
+  useEffect(() => { if (locked) setTab("lock"); }, [locked]);
 
   // Safety timer handling
   const startSafetyTimer = () => {
     setShowSafetyBar(true);
     if (safetyTimerRef.current) window.clearTimeout(safetyTimerRef.current);
     safetyTimerRef.current = window.setTimeout(() => {
-      setBanner({ type: "info", text: "Safety reminder: Consider moving to a safe place." });
-    }, 5 * 60 * 1000); // 5 mins
+      setBanner({ type: "info", text: "Safety reminder: Move to a safe place if you can." });
+    }, 5 * 60 * 1000);
   };
   const stopSafetyTimer = () => {
     setShowSafetyBar(false);
     if (safetyTimerRef.current) { window.clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
   };
 
-  // Move-away monitoring (short session, only during new report)
+  // Move-away monitoring (short session)
   const beginMoveMonitor = (anchor: { lat: number; lon: number }) => {
-    captureAnchorRef.current = anchor;
-    setMoveWarn(false);
+    captureAnchorRef.current = anchor; setMoveWarn(false);
     if (!navigator.geolocation) return;
     if (geoWatchRef.current) { (navigator.geolocation as any).clearWatch(geoWatchRef.current); geoWatchRef.current = null; }
     geoWatchRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         const d = haversine(anchor.lat, anchor.lon, pos.coords.latitude, pos.coords.longitude);
-        // Warn if still within 300m after 5 minutes (we already show timer)
         if (d < 300 && showSafetyBar === false) setMoveWarn(true);
       },
       () => {},
@@ -294,7 +289,6 @@ export default function App() {
       const img = new Image(); img.src = m.dataUrl; img.onload = () => {
         imgRef.current = img;
         const c = canvasRef.current!; const ctx = c.getContext("2d")!;
-        // fit image into canvas width
         const maxW = Math.min(900, window.innerWidth - 40);
         const scale = Math.min(1, maxW / img.width);
         c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
@@ -306,7 +300,6 @@ export default function App() {
       const c = canvasRef.current!; const ctx = c.getContext("2d")!;
       ctx.clearRect(0,0,c.width,c.height);
       ctx.drawImage(imgRef.current!, 0, 0, c.width, c.height);
-      // draw existing rects overlay
       ctx.save(); ctx.strokeStyle = "rgba(255,0,0,0.8)"; ctx.lineWidth = 2;
       rects.forEach(r => { ctx.strokeRect(r.x, r.y, r.w, r.h); });
       if (drag.dragging) { ctx.strokeRect(drag.startX, drag.startY, drag.x - drag.startX, drag.y - drag.startY); }
@@ -332,7 +325,7 @@ export default function App() {
       redraw();
     };
 
-    useEffect(()=>{ if (canvasRef.current && imgRef.current) redraw(); }, [rects]); // update overlay
+    useEffect(()=>{ if (canvasRef.current && imgRef.current) redraw(); }, [rects]);
 
     const applyPixelate = () => {
       const c = canvasRef.current!; const ctx = c.getContext("2d")!;
@@ -428,7 +421,7 @@ export default function App() {
     setTab("my");
   };
 
-  // SMS helpers (from r5)
+  // SMS helpers
   const buildSmsText = (r: Report) => {
     const when = new Date(r.createdAt).toLocaleString();
     const acc = Math.round(r.gps.accuracy || 0);
@@ -456,13 +449,12 @@ Details: ${desc}${cb}`;
     try { window.location.href = link; } catch { copyToClipboard(buildSmsText(r)); }
   };
 
-  // Export helpers (redacted/full/encrypted)
+  // Export helpers
   const redactedClone = (r: Report) => ({
     ...r,
     contact: null,
     media: [],
-    gps: r.gps, // exact kept in JSON for authority; but if you prefer, remove exact:
-    // gps: undefined, // <- uncomment to strip exact (authority-only)
+    gps: r.gps, // keep exact for authority JSON; change to undefined to fully strip
     publicOffset: r.publicOffset,
     blurRadius: r.blurRadius,
   });
@@ -475,7 +467,7 @@ Details: ${desc}${cb}`;
   // Header / Emergency
   const emergencyDial = () => { const ok = window.confirm("Call emergency services (112)?"); if (ok) window.location.href = "tel:112"; };
 
-  // App Lock & Duress
+  // App Lock
   const [pinInput, setPinInput] = useState("");
   const lockIfNeeded = (dest: typeof tab) => {
     if ((dest === "my" && settings.lockMyReports) || (dest === "settings" && settings.lockSettings)) {
@@ -486,28 +478,23 @@ Details: ${desc}${cb}`;
     const hash = await sha256Hex(pinInput);
     if (settings.appPinHash && hash === settings.appPinHash) {
       setLockState("unlocked"); setLocked(false); setPinInput(""); setTab("report"); setBanner({ type: "success", text: "Unlocked." });
-    } else if (settings.duressPinHash && hash === settings.duressPinHash) {
-      // wipe
-      await quickWipe(true);
     } else {
       setBanner({ type: "error", text: "Wrong PIN." });
     }
   };
-  const quickWipe = async (fromDuress = false) => {
-    // delete app data only
+  const quickWipe = async () => {
     try {
       localStorage.removeItem(LS_REPORTS);
       localStorage.removeItem(LS_SETTINGS);
       localStorage.removeItem(LS_NOTES);
       localStorage.removeItem(LS_LOCKSTATE);
-      // attempt IndexedDB cleanup (best-effort)
       try { indexedDB.deleteDatabase("galamwatch"); } catch {}
       try { indexedDB.deleteDatabase("gw-db"); } catch {}
       try { indexedDB.deleteDatabase("keyval-store"); } catch {}
     } catch {}
     setReports([]); setNotes(""); setSettings(defaultSettings); setLockState("unlocked"); setLocked(false);
-    setTab("cover"); setCoverReason(fromDuress ? "Notes" : "Cleared");
-    setBanner({ type: "info", text: fromDuress ? "Duress wipe complete." : "Local data cleared." });
+    setTab("cover"); setCoverReason("Notes");
+    setBanner({ type: "info", text: "Local data cleared." });
   };
 
   // UI atoms
@@ -536,16 +523,15 @@ Details: ${desc}${cb}`;
       <div className="max-w-7xl mx-auto px-3 py-2 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="font-semibold text-base sm:text-lg">{tab === "cover" ? "Notes" : "Galamwatch"}</span>
-          <span className="hidden sm:inline text-xs text-gray-500">{tab === "cover" ? (coverReason ? "Cover active" : "Personal notes") : "r6 • Privacy-first"}</span>
+          <span className="hidden sm:inline text-xs text-gray-500">{tab === "cover" ? (coverReason ? "Cover active" : "Personal notes") : "Privacy-first reporting"}</span>
         </div>
         <div className="flex items-center gap-2">
           {tab !== "cover" ? (
             <>
               <button
                 onClick={() => setTab("cover")}
-                onContextMenu={(e)=>{ e.preventDefault(); quickWipe(false); }} // long-press/right-click for Quick Wipe
                 className="text-sm px-3 py-1.5 rounded-xl bg-gray-100"
-                title="Long-press for Quick Wipe"
+                title="Switch to Notes cover"
               >
                 Quick Hide
               </button>
@@ -706,7 +692,7 @@ Details: ${desc}${cb}`;
                 <input ref={phoneRef} className="rounded-xl border px-3 py-2" placeholder="Phone (optional)" inputMode="tel" />
                 <input ref={emailRef} className="rounded-xl border px-3 py-2" placeholder="Email (optional)" inputMode="email" />
                 <label className="flex items-center gap-2 sm:col-span-2"><input type="checkbox" checked={wantsCallback} onChange={(e) => setWantsCallback(e.target.checked)} /> Request a callback from authorities</label>
-                <input ref={timeRef} className="rounded-xl border px-3 py-2 sm:col-span-2" placeholder="Preferred time (e.g., 16:00–18:00)" />
+                <input ref={timeRef} className="rounded-xl border px-3 py-2 sm:col-span-2" placeholder="Preferred time (e.g., 16:00-18:00)" />
                 <p className="sm:col-span-2 text-xs text-gray-500">Contact stays on your device in this demo. Exported JSON will include it if you choose full export.</p>
               </div>
             )}
@@ -814,7 +800,7 @@ Details: ${desc}${cb}`;
   }
 
   const MapView = () => {
-    const [heat, setHeat] = useState<boolean>(true); // show heatmap in public view
+    const [heat, setHeat] = useState<boolean>(true);
     const selected = reports.find((r) => r.id === selectedReportId) || null;
     const fitPts = useMemo(() => {
       const pts: number[][] = [];
@@ -826,10 +812,9 @@ Details: ${desc}${cb}`;
       return pts;
     }, [userLoc?.lat, userLoc?.lon, selected?.id, privateView]);
 
-    // Build grid for DP heatmap (only in public view)
     const grid = useMemo(() => {
       if (privateView || !heat) return [];
-      const cell = 0.01; // approx ~1.1km lat; lon varies; good enough for demo
+      const cell = 0.01; // ~1.1km lat; good enough for demo
       const map = new Map<string, number>();
       reports.forEach(r => {
         const lat = r.publicOffset.lat, lon = r.publicOffset.lon;
@@ -871,7 +856,6 @@ Details: ${desc}${cb}`;
                   </React.Fragment>
                 );
               })}
-              {/* DP heatmap bubbles */}
               {!privateView && heat && grid.map((g, i) => (
                 <Circle key={i} center={[g.lat, g.lon] as any} radius={Math.min(1200, 300 + g.noisy*150)} pathOptions={{ color: "#0ea5e9", weight: 1, fillOpacity: 0.2 }} />
               ))}
@@ -907,7 +891,7 @@ Details: ${desc}${cb}`;
 
   // Settings (with Learn)
   const Settings = () => {
-    const [pin, setPin] = useState(""); const [duress, setDuress] = useState("");
+    const [pin, setPin] = useState("");
     return (
       <div className="max-w-3xl mx-auto px-3 py-4">
         <Section title="Security">
@@ -924,16 +908,10 @@ Details: ${desc}${cb}`;
                 </button>
               </div>
               <div>
-                <label className="block text-sm font-medium">Set/Change Duress PIN</label>
-                <input className="mt-1 w-full rounded-xl border px-3 py-2" placeholder="Different from App PIN" value={duress} onChange={(e)=>setDuress(e.target.value)} inputMode="numeric" />
-                <button className="mt-2 px-3 py-1.5 rounded bg-gray-900 text-white text-xs"
-                  onClick={async ()=>{ if (!duress) return; const h = await sha256Hex(duress); setSettings({...settings, duressPinHash: h}); setDuress(""); setBanner({ type:"success", text:"Duress PIN saved."}); }}>
-                  Save Duress PIN
-                </button>
+                <label className="block text-sm font-medium">Quick Wipe</label>
+                <button onClick={quickWipe} className="mt-1 px-3 py-1.5 rounded bg-red-600 text-white text-xs">Clear local data</button>
+                <div className="text-xs text-gray-500 mt-1">Removes reports, settings, notes from this device only.</div>
               </div>
-            </div>
-            <div className="sm:col-span-2">
-              <button onClick={()=>quickWipe(false)} className="px-3 py-1.5 rounded bg-red-600 text-white text-xs">Quick Wipe (clear local data)</button>
             </div>
           </div>
         </Section>
@@ -976,11 +954,11 @@ Details: ${desc}${cb}`;
           {showLearn && (
             <div className="mt-3 text-sm text-gray-700 space-y-2">
               <p><b>1) New Report:</b> Tap <i>Use My Location</i>, add a short description (landmarks not faces), attach media, confirm safety, then Submit.</p>
-              <p><b>2) Geo-privacy:</b> Use the blur slider (≥500 m in sensitive areas). Public maps never show exact points.</p>
+              <p><b>2) Geo-privacy:</b> Use the blur slider (>= 500 m in sensitive areas). Public maps never show exact points.</p>
               <p><b>3) Redaction:</b> After attaching a photo, tap <i>Edit/Redact</i> to draw blur boxes over faces/plates. Apply before exporting.</p>
-              <p><b>4) Safety tools:</b> Use Quick Hide (long-press for Quick Wipe), check the “I’m safe” bar, and move away from capture spots.</p>
+              <p><b>4) Safety tools:</b> Use Quick Hide, the “I’m safe” bar, and move away from capture spots when possible.</p>
               <p><b>5) SMS:</b> Set an authority number in Settings. In My Reports → tap <i>SMS Draft</i> (or Copy SMS Text).</p>
-              <p><b>6) Lock & Duress:</b> Set an App PIN to lock My Reports/Settings. Set a Duress PIN to wipe data if forced.</p>
+              <p><b>6) App PIN:</b> Set an App PIN to lock My Reports/Settings (no duress mode).</p>
               <p><b>7) Encrypted export:</b> Set a passphrase; use <i>Export Encrypted</i> to share a protected JSON.</p>
               <p className="text-xs text-gray-500">This demo stores data on your device only. For live use, integrate a secure backend/authority dashboard.</p>
             </div>
@@ -1007,7 +985,7 @@ Details: ${desc}${cb}`;
       <div className="bg-white rounded-2xl shadow p-6 w-full max-w-sm">
         <div className="text-lg font-semibold mb-2">Enter PIN</div>
         <input className="w-full rounded-xl border px-3 py-2 mb-3" value={pinInput} onChange={(e)=>setPinInput(e.target.value)} inputMode="numeric" placeholder="Your PIN" />
-        <div className="text-xs text-gray-500 mb-3">Tip: If you’re under pressure, entering your Duress PIN wipes local data instantly.</div>
+        <div className="text-xs text-gray-500 mb-3">This protects My Reports and Settings on this device.</div>
         <div className="flex gap-2 justify-end">
           <button onClick={tryUnlock} className="px-4 py-2 rounded-xl bg-gray-900 text-white">Unlock</button>
         </div>
